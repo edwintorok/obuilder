@@ -121,7 +121,7 @@ module Json_config = struct
       | [] -> ["network"]
       | xs -> Fmt.failwith "Unsupported network configuration %a" Fmt.Dump.(list string) xs
     in
-    let namespaces = network_ns @ ["pid"; "ipc"; "uts"; "mount"] in
+    let namespaces = network_ns @ ["pid"; "ipc"; "uts"; "mount"; "user"] in
     `Assoc [
       "ociVersion", `String "1.0.1-dev";
       "process", `Assoc [
@@ -152,11 +152,6 @@ module Json_config = struct
       "hostname", `String hostname;
       "mounts", `List (
         mount "/proc"
-          ~options:[      (* TODO: copy to others? *)
-            "nosuid";
-            "noexec";
-            "nodev";
-          ]
           ~ty:"proc"
           ~src:"proc" ::
         mount "/dev"
@@ -177,7 +172,7 @@ module Json_config = struct
             "newinstance";
             "ptmxmode=0666";
             "mode=0620";
-            "gid=5";            (* tty *)
+            (*"gid=5";*)            (* tty *)
           ] ::
         mount "/sys"            (* This is how Docker does it. runc's default is a bit different. *)
           ~ty:"sysfs"
@@ -250,6 +245,17 @@ module Json_config = struct
       );
       "linux", `Assoc [
         "namespaces", `List (List.map namespace namespaces);
+        "uidMappings", `List [`Assoc [
+          "containerID", `Int 0;
+          "hostID", `Int 1000;
+          "size", `Int 1
+         ]];
+        "gidMappings", `List [`Assoc [
+          "containerID", `Int 0;
+          "hostID", `Int 1000;
+          "size", `Int 1
+          
+        ]];
         "maskedPaths", strings [
           "/proc/acpi";
           "/proc/asound";
@@ -289,6 +295,8 @@ let run ~cancelled ?stdin:stdin ~log t config results_dir =
   >>= fun _ ->
   let id = string_of_int !next_id in
   incr next_id;
+  ["proc"; "sys"] |> Lwt_list.iter_p (fun path -> Os.sudo ["mkdir"; "-p"; results_dir / "rootfs" / path]) >>= fun () ->
+  Os.sudo ["touch"; results_dir / "rootfs" / "etc" / "hosts"] >>= fun () ->
   Os.with_pipe_from_child @@ fun ~r:out_r ~w:out_w ->
   let cmd = ["runc"; "--root"; t.runc_state_dir; "run"; id] in
   let stdout = `FD_move_safely out_w in

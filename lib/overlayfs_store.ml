@@ -62,7 +62,7 @@ module Overlayfs = struct
     Os.sudo [ "mv"; src; dst ]
 
   let overlay ~lower ~upper ~work ~merged =
-    Os.sudo [ "mount"; "-t"; "overlay"; "overlay"; "-olowerdir=" ^ lower ^ ",upperdir=" ^ upper ^ ",workdir=" ^ work; merged; ]
+    Os.sudo [ "mount"; "-t"; "overlay"; "overlay"; "-ouserxattr,lowerdir=" ^ lower ^ ",upperdir=" ^ upper ^ ",workdir=" ^ work; merged; ]
 
   let cp ~src ~dst = Os.sudo [ "cp"; "-plRduTf"; src; dst ]
   (*
