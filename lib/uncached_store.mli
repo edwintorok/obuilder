@@ -1,7 +1,8 @@
 (* Do not store build results.
 
-  Does not require root privileges.
-  Can use reflinks for implementing [cache], but falls back to a regular copy if unavailable.
+  Does not require root privileges, and provides pass-through access to caches.
+  (applications need to use their own locking mechanisms if needed,
+   just as they would if called directly by the user)
 
   Can also be used where we do not wish to store the files from a build,
   e.g. during `dune runtest` if we rely `dune`'s caching mechanism instead.

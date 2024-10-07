@@ -1,14 +1,16 @@
-type t = { root: Fpath.t }
+type t = { root: Fpath.t; ro_root: bool }
 
 open Sexplib.Conv
-type config = unit [@@deriving sexp]
+type config = bool [@@deriving sexp]
+
+let ro_root = true
 
 let hosts_of t = Fpath.(t.root / "hosts" |> to_string)
 
-let create ~state_dir _conf =
+let create ~state_dir conf =
   let root = Fpath.v state_dir in
   Os.ensure_dir state_dir;
-  Lwt.return { root }
+  Lwt.return { root; ro_root = conf }
 
 let my_user = Unix.getuid (), Unix.getgid ()
 
@@ -20,8 +22,10 @@ let opts_of_user =
     else ["--unshare-user"; "--uid"; string_of_int uid; "--gid"; string_of_int gid]
 
 
-let opts_of_hostname _t hostname =
-  ["--unshare-uts"; "--hostname"; hostname; (*"--ro-bind"; hosts_of t ; "/etc/hosts"*)]
+let opts_of_hostname t hostname =
+  if hostname <> "" then
+    ["--unshare-uts"; "--hostname"; hostname; "--ro-bind"; hosts_of t ; "/etc/hosts"]
+  else []
 
 let opts_of_cwd cwd = ["--chdir"; cwd]
 
@@ -79,11 +83,11 @@ let default_linux_caps = [
   *)
 ]
 
-let sys_mounts dir =
+let sys_mounts t dir =
   let root = Filename.concat dir "rootfs" in
 (*  ["/proc"; "/dev"; "/sys"; "/sys/fs"; "/sys/fs/cgroup"; "/dev/shm"]
   |> List.iter (fun d -> Os.ensure_dir @@ Filename.concat root d);*)
-  [ "--bind"; root; "/"
+  [ if t.ro_root then "--ro-bind" else "--bind"; root; "/"
   ; "--proc"; "/proc"
   ; "--dev"; "/dev"
   ; "--ro-bind"; "/sys"; "/sys"
@@ -104,7 +108,7 @@ let run ~cancelled ?stdin ~log t config dir =
     List.concat
     [ opts_of_user config.user (* switch namespaces early if needed *)
     ; List.concat_map (fun cap -> ["--cap-add"; cap]) default_linux_caps
-    ; sys_mounts dir (* ensure / is mounted *)
+    ; sys_mounts t dir (* ensure / is mounted *)
     ; ["--new-session"; "--die-with-parent"]
     ; opts_of_cwd config.cwd
     ; opts_of_hostname t config.hostname
@@ -129,4 +133,4 @@ let finished _ = Lwt.return_unit
 
 open Cmdliner
 let cmdliner : config Term.t =
-  Term.(const ())
+  Term.(const false)
