@@ -1,0 +1,6 @@
+(executable
+ (public_name personal_pipelines2)
+ (name main)
+ (preprocess (pps tyxml-ppx ppx_sexp_conv))
+ (libraries hex lwt.unix  current current.cache current_git current_web cmdliner lwt prometheus-app.unix current_ssh current.fs obuilder obuilder-spec))
+
