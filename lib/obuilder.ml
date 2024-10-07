@@ -24,7 +24,7 @@ module Archive_extract = Archive_extract
 (** {2 Sandboxes} *)
 
 module Config = Config
-module Native_sandbox = Sandbox
+module Native_sandbox = Bwrap
 module Docker_sandbox = Docker_sandbox
 
 (** {2 Builders} *)

@@ -20,8 +20,8 @@ let opts_of_user =
     else ["--unshare-user"; "--uid"; string_of_int uid; "--gid"; string_of_int gid]
 
 
-let opts_of_hostname t hostname =
-  ["--unshare-uts"; "--hostname"; hostname; "--ro-bind"; hosts_of t ; "/etc/hosts"]
+let opts_of_hostname _t hostname =
+  ["--unshare-uts"; "--hostname"; hostname; (*"--ro-bind"; hosts_of t ; "/etc/hosts"*)]
 
 let opts_of_cwd cwd = ["--chdir"; cwd]
 
@@ -80,7 +80,10 @@ let default_linux_caps = [
 ]
 
 let sys_mounts dir =
-  [ "--bind"; Filename.concat dir "rootfs"; "/"
+  let root = Filename.concat dir "rootfs" in
+(*  ["/proc"; "/dev"; "/sys"; "/sys/fs"; "/sys/fs/cgroup"; "/dev/shm"]
+  |> List.iter (fun d -> Os.ensure_dir @@ Filename.concat root d);*)
+  [ "--bind"; root; "/"
   ; "--proc"; "/proc"
   ; "--dev"; "/dev"
   ; "--ro-bind"; "/sys"; "/sys"
@@ -100,9 +103,9 @@ let run ~cancelled ?stdin ~log t config dir =
     "bwrap" ::
     List.concat
     [ opts_of_user config.user (* switch namespaces early if needed *)
+    ; List.concat_map (fun cap -> ["--cap-add"; cap]) default_linux_caps
     ; sys_mounts dir (* ensure / is mounted *)
     ; ["--new-session"; "--die-with-parent"]
-    ; List.concat_map (fun cap -> ["--cap-add"; cap]) default_linux_caps
     ; opts_of_cwd config.cwd
     ; opts_of_hostname t config.hostname
     ; opts_of_env config.env
