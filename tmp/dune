@@ -1,0 +1,5 @@
+(executable
+	(name main)
+	(libraries current current.cache current_git current_ssh current_web sha hex obuilder_spec prometheus-app.unix)
+	(preprocess (pps tyxml-ppx ppx_sexp_conv))
+)
