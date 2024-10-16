@@ -135,14 +135,14 @@ let prefix = "private/edvint/ci/"
 (* don't use kojienv apush, it depends on whether remote branch exists or not,
    and we want to avoid conditional code like that
 *)
-let specsync input =
+let specsync ~name input =
   let open Current_git in
   let commit =
     input
     |> make_step
          (module Input)
          (module Commit)
-         ~level:Current.Level.Mostly_harmless ~id:"specsync"
+         ~level:Current.Level.Mostly_harmless ~id:("specsync " ^ name)
        @@ fun job input ->
        with_specscm input ~job
        @@ fun spec ->
@@ -496,10 +496,10 @@ let srpm env_tree =
   let open Current_git in
   let module K = Pair (Kojienv.KojiEnvPath) (Input) in
   env_tree
-  |> make_step
-       (module K)
-       (module Current.String)
-       ~id:"srpm" ~level:Current.Level.Average
+  |> ( make_step
+         (module K)
+         (module Current.String)
+         ~id:"srpm" ~level:Current.Level.Average
      @@ fun job (env, input) ->
      let open Kojienv.KojiEnvPath in
      let tree = Input.spec input in
@@ -518,7 +518,8 @@ let srpm env_tree =
      let env = {env with path} in
      let open Lwt_result.Syntax in
      let+ path = Kojienv.srpm ~job env in
-     Fpath.to_string path
+     Fpath.to_string path )
+  |> Current.map Fpath.v
 
 let build_requires env_spec =
   let open Current_git in
@@ -554,63 +555,107 @@ let rpmbuild env srpm =
      Fpath.to_string path )
   |> Current.map Fpath.v
 
-module PathSet = Set.Make(Fpath)
 module Rpms = struct
-  type t = PathSet.t
+  (* sometimes the order matter, e.g. for chain build, use a list for now *)
+  type t = Fpath.t list
 
-  let marshal t = t |> PathSet.to_seq |> Seq.map Fpath.to_string |> List.of_seq |> String.concat "\n"
+  let marshal t = t |> List.map Fpath.to_string |> String.concat "\n"
 
-  let unmarshal t = t |> String.split_on_char '\n' |> List.to_seq |> Seq.map Fpath.v |> PathSet.of_seq
+  let unmarshal t = t |> String.split_on_char '\n' |> List.map Fpath.v
 
   let digest = marshal
 
-  let pp = Fmt.(Dump.iter PathSet.iter (any "rpms") Fpath.pp)
+  let pp = Fmt.(Dump.list Fpath.pp)
 end
 
+let chain env srpms =
+  let open Current_git in
+  let env_input = Current.pair env srpms in
+  let module K = Pair (Kojienv.KojiEnvPath) (Rpms) in
+  env_input
+  |> make_step (module K) (module Rpms) ~id:"chain" ~level:Current.Level.Average
+     @@ fun job (env, srpms) ->
+     let open Lwt_result.Syntax in
+     let+ paths = Kojienv.chain ~job env (srpms |> List.map Fpath.to_string) in
+     paths
+
 let rsync ~host files =
-  files |> make_step (module Rpms) (module Rpms) ~id:"rsync" ~level:Current.Level.Dangerous @@ fun job rpms ->
-  let cmd = ["--partial"; "--info=progress2"; "-y"; "-e"; "ssh -o StrictHostKeyChecking=no -l root" ] @ (PathSet.elements rpms |> List.map Fpath.to_string)  @ [host ^ ":"] in
-  let cmd = ["sh"; "-c"; Filename.quote_command "rsync" cmd; "2>&1"] in
-  let open Lwt_result.Syntax in
-  let+ () = Current.Process.exec  ~cancellable:true ~job ("", Array.of_list cmd) in
-  PathSet.map Fpath.base rpms
+  files
+  |> make_step
+       (module Rpms)
+       (module Rpms)
+       ~id:"rsync" ~level:Current.Level.Dangerous
+     @@ fun job rpms ->
+     let cmd =
+       [ "rsync"
+       ; "--partial"
+       ; "--info=progress2"
+       ; "-y"
+       ; "-e"
+       ; "ssh -o StrictHostKeyChecking=no -l root" ]
+       @ (rpms |> List.map Fpath.to_string)
+       @ [host ^ ":"]
+     in
+     (*let cmd = ["sh"; "-c"; Filename.quote_command "rsync" cmd; "2>&1"] in*)
+     let open Lwt_result.Syntax in
+     let+ () =
+       Current.Process.exec ~cancellable:true ~job ("", Array.of_list cmd)
+     in
+     List.map Fpath.base rpms
 
 let deploy ~host rpms =
   (*    List.map Filename.basename rpms @*)
   let cmd =
-    rpms
-    |> rsync ~host
+    rpms |> rsync ~host
     |> Current.map (fun rpms ->
-           let rpms = PathSet.elements rpms |> List.map Fpath.to_string in
-           ["yum"; "info" ] @ (List.map Filename.chop_extension rpms) @
-           ["||"; "(yum"; "downgrade"; "-y"] @ rpms @ ["&&"; "xe-toolstack-restart)"] )
+           let rpms = rpms |> List.map Fpath.to_string in
+           ["yum"; "info"]
+           @ List.map Filename.chop_extension rpms
+           @ ["||"; "(yum"; "downgrade"; "-y"]
+           @ rpms
+           @ ["&&"; "xe-toolstack-restart)"] )
   in
-  Current_ssh.run ~schedule:(Current_cache.Schedule.v ()) ~key:"deploy" ("root@" ^ host) cmd
+  Current_ssh.run
+    ~schedule:(Current_cache.Schedule.v ())
+    ~key:"deploy" ("root@" ^ host) cmd
 
 let make_test () =
-  (Current.return ()) |>
-  make_step (module Current.Unit) (module Current.Unit) ~id:"debug" ~level:Current.Level.Harmless @@ fun job () ->
-  let open Lwt_result.Syntax in
-  let* () = Current.Process.exec ~cancellable:true ~job ("", [|"sh"; "-c"; "echo foo >&2; echo bar"|]) in
-  let+ (_:string) = Current.Process.check_output ~cancellable:true ~job ("", [|"sh"; "-c"; "echo foo >&2; echo bar"|]) in
-  ()
+  Current.return ()
+  |> make_step
+       (module Current.Unit)
+       (module Current.Unit)
+       ~id:"debug" ~level:Current.Level.Harmless
+     @@ fun job () ->
+     let open Lwt_result.Syntax in
+     let* () =
+       Current.Process.exec ~cancellable:true ~job
+         ("", [|"sh"; "-c"; "echo foo >&2; echo bar"|])
+     in
+     let+ (_ : string) =
+       Current.Process.check_output ~cancellable:true ~job
+         ("", [|"sh"; "-c"; "echo foo >&2; echo bar"|])
+     in
+     ()
 
-let koji_pipeline' input =
+let koji_pipeline' name input =
+  (* TODO: eventually we should createrepo and add the repo on our own,
+     for now use a shared kojienv for the chainbuild: the kojienv of the first one,
+     this is not quite accurate
+  *)
   let kojitag = "pb-edvint-toolstack" in
   let kojitag = Koji.kojitag kojitag in
   let env = Kojienv.for_srpm_build kojitag in
   let br = build_requires (Current.pair env (Current.map Input.spec input)) in
   let env' = Kojienv.cached_or_make kojitag br in
-  let specs = input |> specsync in
+  let specs = input |> specsync ~name in
   let env_input = Current.pair env specs in
-  let srpm_out = srpm env_input in
-  (* TODO: need to copy the srpm, or hardlink the srpm to a path visible in the other chroot *)
-  let rpm = rpmbuild env' srpm_out in
-  let rpms = Current.map (fun t -> PathSet.singleton t) rpm in
-  let host = "lcy2-dt72.xenrt.citrite.net" in
-  let test = make_test () in
-  Current.all [test; deploy ~host rpms; Current.ignore_value env']
+  (env', srpm env_input)
 
+let koji_pipeline'' envs_srpms =
+  let env' = List.hd envs_srpms |> fst in
+  let rpms = chain env' (List.map snd envs_srpms |> Current.list_seq) in
+  let host = "lcy2-dt72.xenrt.citrite.net" in
+  Current.all [deploy ~host rpms; Current.ignore_value env']
 (* TODO: deploy local, deploy remote? *)
 
 (*let specs = input |> specsync in
@@ -659,15 +704,14 @@ let dune_pipeline commit =
       ; cmd ~gated "install" [configure; Dune.install]
       ; cmd ~gated "runtest" [configure; Dune.runtest] ] )
 
-let repo_pipeline dir =
+let repo_pipeline dirs =
   let open Current_git in
-  let code, input = input_of dir in
-  (*let gate, dune = dune_pipeline code in
-    let input = Current.gate ~on:gate input in*)
-  Current.all
-    [ (*dune
-        ; *)
-      koji_pipeline' input ]
+  dirs
+  |> ( List.map
+     @@ fun dir ->
+     let _code, input = input_of dir in
+     koji_pipeline' (Fpath.basename (Fpath.parent dir)) input )
+  |> koji_pipeline''
 
 (* let kojitag = "pb-edvint-toolstack" in
 
@@ -679,4 +723,4 @@ let repo_pipeline dir =
         (* TODO: deploy/run tests *)
         |> Current.ignore_value ) ]*)
 
-let v ~repodirs () = repodirs |> List.map repo_pipeline |> Current.all
+let v ~repodirs () = repo_pipeline repodirs

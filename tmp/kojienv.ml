@@ -10,6 +10,7 @@ module BuildRequires = struct
   let pp = Fmt.Dump.iter iter (Fmt.any "buildrequires:") Fmt.Dump.string
 
   let marshal t = t |> elements |> String.concat "\n"
+
   let unmarshal t = t |> String.split_on_char '\n' |> of_list
 end
 
@@ -177,54 +178,66 @@ let for_srpm_build ?(schedule = rare) kojitag =
   cached_or_make ~schedule kojitag
     (BuildRequires.singleton "rpm-build" |> Current.return)
 
-let mockop env_path ~job ~phase fmt =
+let mockop ?(chain=false) env_path ~job ~phase fmt =
   let open KojiEnvPath in
   let resultdir = Printf.sprintf "SRPM/build%s" phase in
-  let Kojitag kojitag = env_path.kojitag in
+  let (Kojitag kojitag) = env_path.kojitag in
   let f args =
     let open Lwt_result.Syntax in
     let cmd =
       (* FIXME: stderr logging should really work in check_output instead! *)
       Printf.sprintf
-        "kojienv mockop %S --resultdir=%s --no-clean --no-cleanup-after %s"
-        kojitag resultdir args
+        "kojienv mockop %S %s=%s --no-clean --no-cleanup-after -v %s"
+        kojitag (if chain then "--localrepo" else "--resultdir") resultdir args
     in
     let* () =
-        Current.Process.exec ~cancellable:true ~job ~cwd:env_path.path
-          ("", Array.of_list ["mkdir"; "-p"; resultdir])
+      Current.Process.exec ~cancellable:true ~job ~cwd:env_path.path
+        ("", Array.of_list ["mkdir"; "-p"; resultdir])
     in
-    Current.Job.log job "Executing in %a: %s" Fpath.pp env_path.path cmd;
+    Current.Job.log job "Executing in %a: %s" Fpath.pp env_path.path cmd ;
     let+ output =
       Current.Process.check_output ~cancellable:true ~job ~cwd:env_path.path
-        ("", [|"bash";"-c"; cmd;(* "2>&1"*)|])
+        ("", [|"bash"; "-c"; cmd (* "2>&1"*)|])
     in
     (output, Fpath.(env_path.path // v resultdir))
   in
   Format.kasprintf f fmt
 
-let find_suffix cwd suffix =
+let find_suffixes cwd suffix =
   Lwt_unix.files_of_directory (Fpath.to_string cwd)
-  |> Lwt_stream.find (String.ends_with ~suffix)
+  |> Lwt_stream.filter (String.ends_with ~suffix)
+  |> Lwt_stream.to_list
   |> Lwt.map
      @@ function
-     | None ->
-         Fmt.error_msg "No file with suffix %S was found in %a" suffix Fpath.pp cwd
-     | Some file ->
-         Ok file
+     | [] ->
+         Fmt.error_msg "No file with suffix %S was found in %a" suffix Fpath.pp
+           cwd
+     | files ->
+         Ok files
+
+let find_suffix cwd suffix =
+  let open Lwt_result.Syntax in
+  let+ files = find_suffixes cwd suffix in
+  List.hd files
 
 (* TODO: should really hash just xapi.spec here *)
 let build_requires ~job input =
   let open Lwt_result.Syntax in
   let* specfile = find_suffix input.KojiEnvPath.path ".spec" in
-  let rel_specfile = Filename.concat (Fpath.basename input.KojiEnvPath.path) specfile in
+  let rel_specfile =
+    Filename.concat (Fpath.basename input.KojiEnvPath.path) specfile
+  in
   (* we could filter in OCaml instead *)
   let+ output, _ =
     mockop ~job ~phase:"buildrequires" input
-      "--quiet --chroot 'rpmspec --query --srpm --requires /local/%S 2>&1| grep -v warning:'"
+      "--quiet --chroot 'rpmspec --query --srpm --requires /local/%S 2>&1| \
+       grep -v warning:'"
       rel_specfile
   in
-  let br =  output |> String.trim |> String.split_on_char '\n' |> BuildRequires.of_list in
-  Current.Job.log job "BuildRequires: %a" BuildRequires.pp br;
+  let br =
+    output |> String.trim |> String.split_on_char '\n' |> BuildRequires.of_list
+  in
+  Current.Job.log job "BuildRequires: %a" BuildRequires.pp br ;
   br
 
 let srpm ~job input =
@@ -232,9 +245,10 @@ let srpm ~job input =
   let open Lwt_result.Syntax in
   let* specfile = find_suffix input.path ".spec" in
   let cwd = input.path in
-  let* () = Current.Process.exec ~cancellable:true ~job ~cwd
-    ("", [|"xenpkg"; "makesources"|])
-   in
+  let* () =
+    Current.Process.exec ~cancellable:true ~job ~cwd
+      ("", [|"xenpkg"; "makesources"|])
+  in
   let* _, resultdir =
     mockop ~job ~phase:"srpm" input "--buildsrpm --spec %S --sources SRPM"
       specfile
@@ -246,7 +260,30 @@ let rpmbuild ~job input srpm =
   let open Lwt_result.Syntax in
   let cwd = input.KojiEnvPath.path in
   let base = Filename.basename srpm in
-  let* () = Current.Process.exec ~cwd ~cancellable:true ~job ("",[|"cp"; srpm; base|]) in
-  let* _, resultdir = mockop ~job ~phase:"rpmbuild" input "--config-opts=rpmbuild_networking=False --rebuild %S" base in
+  let* () =
+    Current.Process.exec ~cwd ~cancellable:true ~job ("", [|"cp"; srpm; base|])
+  in
+  let* _, resultdir =
+    mockop ~job ~phase:"rpmbuild" input
+      "--config-opts=rpmbuild_networking=False --rebuild %S" base
+  in
   let+ name = find_suffix resultdir ".rpm" in
   Fpath.(resultdir / name)
+
+let chain ~job input srpms =
+  let open Lwt_result.Syntax in
+  let cwd = input.KojiEnvPath.path in
+  let bases = List.map Filename.basename srpms in
+  let* () =
+    Current.Process.exec ~cwd ~cancellable:true ~job
+      ("", ["cp"; "-t"; "."] @ srpms |> Array.of_list)
+  in
+  let* _, resultdir =
+    mockop ~chain:true ~job ~phase:"rpmbuild" input
+      "--config-opts=rpmbuild_networking=False --chain %s"
+      (List.map Filename.quote bases |> String.concat " ")
+  in
+  let+ names =
+    Current.Process.check_output ~cwd:resultdir ~job ~cancellable:true ("", [|"find"; "."; "-name"; "*.rpm"; "-a"; "-not"; "-name"; "*.src.rpm"|])
+  in
+  names |> String.trim |> String.split_on_char '\n' |> List.map (fun s -> Fpath.(resultdir // v s))

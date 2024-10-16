@@ -22,3 +22,19 @@ module Dune = struct
 
    (* TODO: wrap with opam, caches, etc: *)
 end
+
+module Kojienv = struct
+   let kojienv = Cmd.v "kojienv"
+
+   let create = Cmd.(kojienv % "new")
+
+   let update = Cmd.(kojienv % "update")
+
+   let list = Cmd.(kojienv % "list")
+
+   let mock_clean kojitag args = Cmd.(kojienv % "mockop" % kojitag %% args)
+
+   let install kojitag deps = mock_clean kojitag Cmd.(v "--install" %% deps)
+
+   let mock_noclean kojitag args = mock_clean kojitag Cmd.(v "--no-clean" % "--no-cleanup-after" % "-v")
+end
