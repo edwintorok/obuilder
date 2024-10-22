@@ -1,4 +1,4 @@
-open Koji
+(* open Koji *)
 
 let string_hash s = s |> Sha256.string |> Sha256.to_hex
 
@@ -284,6 +284,6 @@ let chain ~job input srpms =
       (List.map Filename.quote bases |> String.concat " ")
   in
   let+ names =
-    Current.Process.check_output ~cwd:resultdir ~job ~cancellable:true ("", [|"find"; "."; "-name"; "*.rpm"; "-a"; "-not"; "-name"; "*.src.rpm"|])
+    Current.Process.check_output ~cwd:Fpath.(resultdir / "results") ~job ~cancellable:true ("", [|"find"; "."; "-name"; "*.rpm"; "-a"; "-not"; "-name"; "*.src.rpm"|])
   in
-  names |> String.trim |> String.split_on_char '\n' |> List.map (fun s -> Fpath.(resultdir // v s))
+  names |> String.trim |> String.split_on_char '\n' |> List.map (fun s -> Fpath.(resultdir / "results" //  v s))
