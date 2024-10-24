@@ -499,3 +499,4 @@ let toolstack_restart host rpms =
      @@ fun job (_rpms, host) ->
      (* rpms is used as cache input, but not actually used in the actual command, we just want to know whether any RPMs have changed or not *)
      run ~job Cmd.(ssh % host % "xe-toolstack-restart")
+
